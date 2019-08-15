@@ -125,9 +125,17 @@ func UnpackManifest(ctx context.Context, engine cas.Engine, bundle string, manif
 				fsEval = fseval.RootlessFsEval
 			}
 			// It's too late to care about errors.
+			// #nosec G104
 			_ = fsEval.RemoveAll(rootfsPath)
 		}
 	}()
+
+	if _, err := os.Lstat(rootfsPath); !os.IsNotExist(err) {
+		if err == nil {
+			err = fmt.Errorf("%s already exists", rootfsPath)
+		}
+		return err
+	}
 
 	log.Infof("unpack rootfs: %s", rootfsPath)
 	if err := UnpackRootfs(ctx, engine, rootfsPath, manifest, opt); err != nil {
@@ -152,14 +160,7 @@ func UnpackManifest(ctx context.Context, engine cas.Engine, bundle string, manif
 func UnpackRootfs(ctx context.Context, engine cas.Engine, rootfsPath string, manifest ispec.Manifest, opt *MapOptions) (err error) {
 	engineExt := casext.NewEngine(engine)
 
-	if _, err := os.Lstat(rootfsPath); !os.IsNotExist(err) {
-		if err == nil {
-			err = fmt.Errorf("%s already exists", rootfsPath)
-		}
-		return err
-	}
-
-	if err := os.Mkdir(rootfsPath, 0755); err != nil {
+	if err := os.Mkdir(rootfsPath, 0755); err != nil && !os.IsExist(err) {
 		return errors.Wrap(err, "mkdir rootfs")
 	}
 
@@ -173,6 +174,7 @@ func UnpackRootfs(ctx context.Context, engine cas.Engine, rootfsPath string, man
 				fsEval = fseval.RootlessFsEval
 			}
 			// It's too late to care about errors.
+			// #nosec G104
 			_ = fsEval.RemoveAll(rootfsPath)
 		}
 	}()
@@ -208,13 +210,13 @@ func UnpackRootfs(ctx context.Context, engine cas.Engine, rootfsPath string, man
 		return errors.Wrap(err, "get config blob")
 	}
 	defer configBlob.Close()
-	if configBlob.MediaType != ispec.MediaTypeImageConfig {
-		return errors.Errorf("unpack rootfs: config blob is not correct mediatype %s: %s", ispec.MediaTypeImageConfig, configBlob.MediaType)
+	if configBlob.Descriptor.MediaType != ispec.MediaTypeImageConfig {
+		return errors.Errorf("unpack rootfs: config blob is not correct mediatype %s: %s", ispec.MediaTypeImageConfig, configBlob.Descriptor.MediaType)
 	}
 	config, ok := configBlob.Data.(ispec.Image)
 	if !ok {
 		// Should _never_ be reached.
-		return errors.Errorf("[internal error] unknown config blob type: %s", configBlob.MediaType)
+		return errors.Errorf("[internal error] unknown config blob type: %s", configBlob.Descriptor.MediaType)
 	}
 
 	// We can't understand non-layer images.
@@ -232,8 +234,8 @@ func UnpackRootfs(ctx context.Context, engine cas.Engine, rootfsPath string, man
 			return errors.Wrap(err, "get layer blob")
 		}
 		defer layerBlob.Close()
-		if !isLayerType(layerBlob.MediaType) {
-			return errors.Errorf("unpack rootfs: layer %s: blob is not correct mediatype: %s", layerBlob.Digest, layerBlob.MediaType)
+		if !isLayerType(layerBlob.Descriptor.MediaType) {
+			return errors.Errorf("unpack rootfs: layer %s: blob is not correct mediatype: %s", layerBlob.Descriptor.Digest, layerBlob.Descriptor.MediaType)
 		}
 		layerData, ok := layerBlob.Data.(io.ReadCloser)
 		if !ok {
@@ -242,7 +244,7 @@ func UnpackRootfs(ctx context.Context, engine cas.Engine, rootfsPath string, man
 		}
 
 		layerRaw := layerData
-		if needsGunzip(layerBlob.MediaType) {
+		if needsGunzip(layerBlob.Descriptor.MediaType) {
 			// We have to extract a gzip'd version of the above layer. Also note
 			// that we have to check the DiffID we're extracting (which is the
 			// sha256 sum of the *uncompressed* layer).
@@ -265,9 +267,12 @@ func UnpackRootfs(ctx context.Context, engine cas.Engine, rootfsPath string, man
 		// in the later diff_id check failing because the digester didn't get
 		// the whole uncompressed stream). Just blindly consume anything left
 		// in the layer.
-		_, _ = io.Copy(ioutil.Discard, layer)
-		// XXX: Is it possible this breaks in the error path?
-		layerData.Close()
+		if _, err = io.Copy(ioutil.Discard, layer); err != nil {
+			return errors.Wrap(err, "discard trailing archive bits")
+		}
+		if err := layerData.Close(); err != nil {
+			return errors.Wrap(err, "close layer data")
+		}
 
 		layerDigest := layerDigester.Digest()
 		if layerDigest != layerDiffID {
@@ -303,13 +308,13 @@ func UnpackRuntimeJSON(ctx context.Context, engine cas.Engine, configFile io.Wri
 		return errors.Wrap(err, "get config blob")
 	}
 	defer configBlob.Close()
-	if configBlob.MediaType != ispec.MediaTypeImageConfig {
-		return errors.Errorf("unpack manifest: config blob is not correct mediatype %s: %s", ispec.MediaTypeImageConfig, configBlob.MediaType)
+	if configBlob.Descriptor.MediaType != ispec.MediaTypeImageConfig {
+		return errors.Errorf("unpack manifest: config blob is not correct mediatype %s: %s", ispec.MediaTypeImageConfig, configBlob.Descriptor.MediaType)
 	}
 	config, ok := configBlob.Data.(ispec.Image)
 	if !ok {
 		// Should _never_ be reached.
-		return errors.Errorf("[internal error] unknown config blob type: %s", configBlob.MediaType)
+		return errors.Errorf("[internal error] unknown config blob type: %s", configBlob.Descriptor.MediaType)
 	}
 
 	g, err := rgen.New(runtime.GOOS)
@@ -322,7 +327,8 @@ func UnpackRuntimeJSON(ctx context.Context, engine cas.Engine, configFile io.Wri
 
 	// Add UIDMapping / GIDMapping options.
 	if len(mapOptions.UIDMappings) > 0 || len(mapOptions.GIDMappings) > 0 {
-		g.AddOrReplaceLinuxNamespace("user", "")
+		// #nosec G104
+		_ = g.AddOrReplaceLinuxNamespace("user", "")
 	}
 	g.ClearLinuxUIDMappings()
 	for _, m := range mapOptions.UIDMappings {

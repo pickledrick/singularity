@@ -26,6 +26,7 @@ import (
 
 	"github.com/apex/log"
 	"github.com/openSUSE/umoci/oci/cas"
+	"github.com/openSUSE/umoci/pkg/hardening"
 	"github.com/opencontainers/go-digest"
 	imeta "github.com/opencontainers/image-spec/specs-go"
 	ispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -170,7 +171,9 @@ func (e *dirEngine) PutBlob(ctx context.Context, reader io.Reader) (digest.Diges
 	if err != nil {
 		return "", -1, errors.Wrap(err, "copy to temporary blob")
 	}
-	fh.Close()
+	if err := fh.Close(); err != nil {
+		return "", -1, errors.Wrap(err, "close temporary blob")
+	}
 
 	// Get the digest.
 	path, err := blobPath(digester.Digest())
@@ -195,7 +198,11 @@ func (e *dirEngine) GetBlob(ctx context.Context, digest digest.Digest) (io.ReadC
 		return nil, errors.Wrap(err, "compute blob path")
 	}
 	fh, err := os.Open(filepath.Join(e.path, path))
-	return fh, errors.Wrap(err, "open blob")
+	return &hardening.VerifiedReadCloser{
+		Reader:         fh,
+		ExpectedDigest: digest,
+		ExpectedSize:   int64(-1), // We don't know the expected size.
+	}, errors.Wrap(err, "open blob")
 }
 
 // PutIndex sets the index of the OCI image to the given index, replacing the
@@ -220,7 +227,9 @@ func (e *dirEngine) PutIndex(ctx context.Context, index ispec.Index) error {
 	if err := json.NewEncoder(fh).Encode(index); err != nil {
 		return errors.Wrap(err, "write temporary index")
 	}
-	fh.Close()
+	if err := fh.Close(); err != nil {
+		return errors.Wrap(err, "close temporary index")
+	}
 
 	// Move the blob to its correct path.
 	path := filepath.Join(e.path, indexFile)
